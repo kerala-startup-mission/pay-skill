@@ -1,0 +1,235 @@
+# Pay API reference (client portal)
+
+Base URL: `{PAY_BASE_URL}/api/v1`
+
+## Authentication
+
+Every request:
+
+```
+Authorization: Bearer pay_live_7f3a2b9c_JQ4kR2mXv9pLnB6sT0wYcZaHdEfGiKlMnOpQrStU
+```
+
+`X-Api-Key: <token>` is accepted as an alternative. The key is shown once at
+issue time; only its hash is stored. Lost keys are rotated, not recovered.
+
+The **signing secret** is a separate value used only for HMAC verification. It
+is never sent in a request.
+
+---
+
+## POST /orders
+
+Creates an order, or returns the existing one for a repeated `receipt`.
+
+### Request
+
+```json
+{
+  "receipt": "ORD-2026-0091",
+  "amount": 250000,
+  "currency": "INR",
+  "description": "Seed Fund application fee",
+  "customer": { "name": "Asha", "email": "asha@example.in", "phone": "+919000000000" },
+  "return_url": "https://portal.example.in/payments/return",
+  "cancel_url": "https://portal.example.in/cart",
+  "notes": { "application_id": "APP-77" },
+  "expires_in": 1800
+}
+```
+
+| field | required | rules |
+|---|---|---|
+| `receipt` | yes | string, max 120, `^[A-Za-z0-9._\-]+$`, unique per client. Idempotency key. |
+| `amount` | yes | **integer** paise, min 100, max 50000000 (defaults; operator-configurable). `250000.00` and `"2.5e5"` are rejected. |
+| `currency` | yes | 3 chars, `INR`. |
+| `description` | no | string, max 255. Shown on checkout. |
+| `customer.name` | no | string, max 255. Prefills checkout. |
+| `customer.email` | no | valid email, max 255. |
+| `customer.phone` | no | string, max 32. |
+| `return_url` | yes | valid URL, origin must be on the client's allowlist (scheme + host + port). |
+| `cancel_url` | no | same allowlist rule. Defaults to `return_url`. |
+| `notes` | no | object, up to 13 keys, each value a string max 256 chars. |
+| `expires_in` | no | integer seconds, 300–86400. Default 1800. |
+
+**Reserved note keys** — sending any of these is a `422`:
+`pay_receipt`, `pay_client_id`, `pay_order_id`. Pay adds them itself
+(`pay_receipt` + `pay_client_id` on the order; `pay_receipt` + `pay_order_id` on
+the payment).
+
+**Payment notes are visible to the payer** — they appear in the checkout page
+source. Put nothing secret in `notes`.
+
+### Response — `201 Created` (new) / `200 OK` (idempotent replay)
+
+```json
+{
+  "id": "order_01JQ8ZK3M4N5P6Q7R8S9T0",
+  "entity": "order",
+  "receipt": "ORD-2026-0091",
+  "amount": 250000,
+  "amount_paid": 0,
+  "amount_due": 250000,
+  "currency": "INR",
+  "status": "created",
+  "attempts": 0,
+  "description": "Seed Fund application fee",
+  "notes": { "application_id": "APP-77", "pay_receipt": "ORD-2026-0091", "pay_client_id": "..." },
+  "created_at": 1774687200,
+  "paid_at": null,
+  "checkout_url": "https://pay.example.in/pay/9f3c...",
+  "expires_at": "2026-08-28T09:30:00Z"
+}
+```
+
+`created_at` and `paid_at` are unix timestamps (integers). `expires_at` is
+ISO-8601. `checkout_url` carries a 256-bit checkout token distinct from `id` —
+treat it as a secret URL and do not log it.
+
+---
+
+## GET /orders/{order_id}
+
+Same entity as above minus nothing — plus `checkout_url` and `expires_at`.
+`amount_paid`, `amount_due` and `attempts` are computed from payment rows.
+
+**This response is the only authority for fulfilment.**
+
+### Order status
+
+| status | meaning |
+|---|---|
+| `created` | no payment attempted |
+| `attempted` | at least one payment tried, none succeeded |
+| `paid` | terminal — fulfil on this |
+| `expired` | checkout window elapsed — **not final** |
+| `cancelled` | cancelled before payment — **not final** |
+
+An `expired` or `cancelled` order can still become `paid` if a payment was in
+flight when the window closed.
+
+---
+
+## GET /orders
+
+Paginated list, newest first. `?per_page=25` (max 100).
+
+```json
+{ "entity": "collection", "count": 42, "items": [ { "entity": "order", ... } ] }
+```
+
+---
+
+## GET /orders/{order_id}/payments
+
+All payment attempts on the order, newest first, in the same collection
+envelope. One row per attempt; a retry after a failure creates a new row.
+
+```json
+{
+  "id": "pay_01JQ...",
+  "entity": "payment",
+  "order_id": "order_01JQ...",
+  "amount": 250000,
+  "currency": "INR",
+  "status": "failed",
+  "method": "upi",
+  "error_code": "BAD_REQUEST_ERROR",
+  "error_description": "Payment was not completed on time.",
+  "created_at": 1774688100
+}
+```
+
+Null fields are omitted. Payment status: `created` → `authorized` → `captured`,
+or `failed`.
+
+## GET /payments/{payment_id}
+
+The single payment entity above.
+
+---
+
+## The signed signal (redirect + webhook)
+
+Four fields, one canonical string, one HMAC:
+
+```
+canonical = order_id|receipt|status|ts
+signature = hex hmac_sha256(canonical, PAY_SIGNING_SECRET)
+```
+
+| field | notes |
+|---|---|
+| `order_id` | the order's public id |
+| `receipt` | your receipt |
+| `status` | the order status at the moment of the change |
+| `ts` | unix timestamp of the status change, joined as a plain decimal integer |
+
+None of the four can contain `|` — receipts are validated against
+`^[A-Za-z0-9._\-]+$` at creation and the other three are generated by Pay.
+
+**Redirect**: fields arrive as query parameters on `return_url` / `cancel_url`,
+signature as the `signature` query parameter.
+
+**Webhook**: fields arrive as JSON body keys, signature as the `X-Pay-Signature`
+header.
+
+Reject anything whose `ts` is more than 300 seconds old.
+
+### Webhook headers
+
+| header | signed? | use |
+|---|---|---|
+| `X-Pay-Signature` | — | the HMAC |
+| `X-Pay-Event` | **no** | `order.attempted` / `order.paid` / `order.expired` / `order.cancelled` |
+| `X-Pay-Event-Id` | **no** | UUID for support/debugging only |
+
+Read status from the body. Deduplicate on order id + status.
+
+### Retry ladder
+
+Non-2xx or timeout (20s) → retried 8 times:
+`10s → 30s → 2m → 10m → 30m → 2h → 6h → 12h` (±10% jitter), then dead-lettered.
+`410 Gone` stops delivery of that event permanently. Dead-lettered deliveries
+can be redriven by hand — quote `X-Pay-Event-Id` to the operator.
+
+---
+
+## Errors
+
+| status | code | meaning | retry |
+|---|---|---|---|
+| `401` | `unauthenticated` | missing/malformed/unknown/revoked/expired key, or suspended client | no |
+| `404` | — | no such order or payment **for you** (cross-tenant ids return 404, not 403) | no |
+| `409` | — | `receipt` reused with different amount/currency | no — fix amount or new receipt |
+| `422` | — | validation failed | no |
+| `429` | — | rate limited | yes, after backoff |
+| `502` | `gateway_error` | Pay could not reach Razorpay | yes — **same receipt** |
+
+Envelope for `401` / `429` / `502`:
+
+```json
+{ "error": { "code": "gateway_error", "message": "..." } }
+```
+
+`422` uses the Laravel validation shape:
+
+```json
+{ "message": "The amount must be an integer number of paise.",
+  "errors": { "amount": ["The amount must be an integer number of paise."] } }
+```
+
+Handle both shapes — check for `errors` first, fall back to `error.message`,
+fall back to the status code.
+
+### Rate limits
+
+Per client (not per IP):
+
+| bucket | limit |
+|---|---|
+| `POST /orders` | 60/min |
+| all reads (`GET /orders`, `/orders/{id}`, `/orders/{id}/payments`, `/payments/{id}`) | 300/min |
+
+The sweep shares the read bucket — batch it and do not poll every open order
+every few seconds.

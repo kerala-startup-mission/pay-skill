@@ -1,0 +1,6 @@
+interface:
+  display_name: "Pay Integration"
+  short_description: "Integrate a client portal with the Pay payment service"
+  default_prompt: "Integrate this portal with the Pay payment service."
+policy:
+  allow_implicit_invocation: true

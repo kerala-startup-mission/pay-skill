@@ -1,0 +1,6 @@
+{
+  "name": "pay",
+  "description": "Integrate a client portal with the Pay payment service: create orders, hosted checkout, verify signed return/webhook, poll, fulfil idempotently, sweep.",
+  "version": "1.0.0",
+  "author": { "name": "Kerala Startup Mission" }
+}

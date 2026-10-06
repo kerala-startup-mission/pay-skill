@@ -1,0 +1,11 @@
+{
+  "name": "pay-skill",
+  "owner": { "name": "Kerala Startup Mission" },
+  "plugins": [
+    {
+      "name": "pay",
+      "source": "./",
+      "description": "Skill for integrating a client portal with the Pay payment service."
+    }
+  ]
+}
